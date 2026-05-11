@@ -1,0 +1,23 @@
+# Binaries
+gembot
+gembot_new
+test_card
+test_acp
+
+# OS files
+.DS_Store
+*.swp
+
+# Environment / Secrets
+.env
+*.db
+*.db-journal
+
+# References & Prompts
+references/
+GEMINI.md
+MEMORY.md
+.geminiignore
+
+# Go
+vendor/
