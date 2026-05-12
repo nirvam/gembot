@@ -117,7 +117,7 @@ func TestStore_CleanupExpired(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
-	
+
 	s.SaveSession(ctx, "old", "old-sess", "c", "t")
 	s.SaveSession(ctx, "new", "new-sess", "c", "t")
 

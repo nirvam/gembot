@@ -11,7 +11,6 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/larksuite/oapi-sdk-go/v3/ws"
-	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/nirvam/gembot/internal/acp"
 	"github.com/nirvam/gembot/internal/core"
 	"github.com/nirvam/gembot/internal/store"
@@ -94,12 +93,12 @@ func buildCardContent(text string, logs []*acp.LogEntry) string {
 		}
 
 		elements = append(elements, map[string]interface{}{
-			"tag":                "collapsible_panel",
-			"element_id":         "execution_details",
-			"expanded":           false,
-			"background_color":   "neutral",
-			"vertical_spacing":   "8px",
-			"padding":            "8px 8px 8px 8px",
+			"tag":              "collapsible_panel",
+			"element_id":       "execution_details",
+			"expanded":         false,
+			"background_color": "neutral",
+			"vertical_spacing": "8px",
+			"padding":          "8px 8px 8px 8px",
 			"header": map[string]interface{}{
 				"title": map[string]interface{}{
 					"tag":     "markdown",
@@ -148,7 +147,7 @@ func NewFeishuAdapter(appID, appSecret, verificationToken, encryptKey string, ma
 
 			msg := event.Event.Message
 			msgID := *msg.MessageId
-			
+
 			// Idempotency check
 			processed, err := a.store.IsProcessed(ctx, msgID)
 			if err != nil {
@@ -201,7 +200,7 @@ func NewFeishuAdapter(appID, appSecret, verificationToken, encryptKey string, ma
 			}
 
 			// Start streaming updates
-			go a.streamUpdates(a.manager.Context(), topicID, textContent, chatID, threadID, replyMsgID)
+			go a.streamUpdates(a.manager.Context(), topicID, textContent, msgID, chatID, threadID, replyMsgID)
 
 			return nil
 		}).
@@ -214,8 +213,8 @@ func NewFeishuAdapter(appID, appSecret, verificationToken, encryptKey string, ma
 	return a
 }
 
-func (a *FeishuAdapter) streamUpdates(ctx context.Context, topicID, message, chatID, threadID, replyMsgID string) {
-	updateCh := a.manager.HandleMessage(topicID, message, chatID, threadID)
+func (a *FeishuAdapter) streamUpdates(ctx context.Context, topicID, message, messageID, chatID, threadID, replyMsgID string) {
+	updateCh := a.manager.HandleMessage(topicID, message, messageID, chatID, threadID)
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -317,49 +316,4 @@ func (a *FeishuAdapter) FormatMarkdown(text string) string {
 func (a *FeishuAdapter) Start(ctx context.Context) error {
 	log.Printf("Starting Feishu WebSocket client...")
 	return a.wsClient.Start(ctx)
-}
-
-func (a *FeishuAdapter) GetHistory(ctx context.Context, chatID, threadID, topicID string) ([]acpsdk.ContentBlock, error) {
-	var messages []*larkim.Message
-	
-	// Use chat list and filter by topicID (which is the root_id)
-	req := larkim.NewListMessageReqBuilder().
-		ContainerIdType("chat").
-		ContainerId(chatID).
-		PageSize(50).
-		Build()
-	
-	resp, err := a.client.Im.Message.List(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	if !resp.Success() {
-		return nil, fmt.Errorf("list message failed: %s", resp.Msg)
-	}
-	
-	for _, item := range resp.Data.Items {
-		// A message belongs to the topic if its root_id matches the topicID,
-		// or if the message itself is the topic root.
-		if (item.RootId != nil && *item.RootId == topicID) || (item.MessageId != nil && *item.MessageId == topicID) {
-			messages = append(messages, item)
-		}
-	}
-
-	var blocks []acpsdk.ContentBlock
-	for _, m := range messages {
-		var contentObj struct {
-			Text string `json:"text"`
-		}
-		if m.Body != nil && m.Body.Content != nil {
-			if err := json.Unmarshal([]byte(*m.Body.Content), &contentObj); err == nil {
-				role := "User"
-				if m.Sender != nil && m.Sender.IdType != nil && *m.Sender.IdType == "app_id" {
-					role = "Assistant"
-				}
-				blocks = append(blocks, acpsdk.TextBlock(fmt.Sprintf("%s: %s", role, contentObj.Text)))
-			}
-		}
-	}
-	
-	return blocks, nil
 }

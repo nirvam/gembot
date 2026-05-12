@@ -3,21 +3,35 @@ package core
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 
-	"github.com/nirvam/gembot/internal/acp"
 	acpsdk "github.com/coder/acp-go-sdk"
+	"github.com/nirvam/gembot/internal/acp"
 	"github.com/nirvam/gembot/internal/config"
 	"github.com/nirvam/gembot/internal/store"
 )
 
 type mockBridge struct {
-	newSessionFunc func(ctx context.Context) (string, error)
-	sendMessageFunc func(ctx context.Context, sessionID string, prompt ...acpsdk.ContentBlock) (<-chan acp.StreamEvent, error)
+	newSessionFunc      func(ctx context.Context) (string, error)
+	sendMessageFunc     func(ctx context.Context, sessionID string, prompt ...acpsdk.ContentBlock) (<-chan acp.StreamEvent, error)
+	supportsLoadSession bool
+	loadSessionFunc     func(ctx context.Context, sessionID string) error
 }
 
 func (m *mockBridge) NewSession(ctx context.Context) (string, error) {
 	return m.newSessionFunc(ctx)
+}
+
+func (m *mockBridge) SupportsLoadSession() bool {
+	return m.supportsLoadSession
+}
+
+func (m *mockBridge) LoadSession(ctx context.Context, sessionID string) error {
+	if m.loadSessionFunc != nil {
+		return m.loadSessionFunc(ctx, sessionID)
+	}
+	return nil
 }
 
 func (m *mockBridge) SendMessage(ctx context.Context, sessionID string, prompt ...acpsdk.ContentBlock) (<-chan acp.StreamEvent, error) {
@@ -55,8 +69,8 @@ func TestManager_HandleMessage(t *testing.T) {
 	m := NewManager(cfg, s, mock)
 	defer m.Stop()
 
-	updateCh := m.HandleMessage("topic-1", "Hi", "chat-1", "thread-1")
-	
+	updateCh := m.HandleMessage("topic-1", "Hi", "msg-1", "chat-1", "thread-1")
+
 	var responses []acp.StreamEvent
 	for resp := range updateCh {
 		responses = append(responses, resp)
@@ -105,3 +119,93 @@ func TestManager_HashRouting(t *testing.T) {
 		t.Errorf("idx1 (%d) and idx3 (%d) should be equal for the same topic", idx1, idx3)
 	}
 }
+
+type mockAdapter struct {}
+
+func (m *mockAdapter) Start(ctx context.Context) error { return nil }
+func (m *mockAdapter) Reply(ctx context.Context, msgID string, content string) (string, error) {
+	return "reply-1", nil
+}
+func (m *mockAdapter) Patch(ctx context.Context, msgID string, content string, logs []*acp.LogEntry) error {
+	return nil
+}
+func (m *mockAdapter) FormatMarkdown(text string) string { return text }
+
+func TestManager_LoadSession(t *testing.T) {
+	dbPath := "test_load_session.db"
+	defer os.Remove(dbPath)
+
+	s, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to init store: %v", err)
+	}
+	defer s.Close()
+
+	cfg := &config.Config{WorkerCount: 1}
+	topicID := "topic-load"
+	chatID := "chat-1"
+	threadID := "thread-1"
+
+	var mu sync.Mutex
+	var loadSessionCalled bool
+
+	mockB := &mockBridge{
+		newSessionFunc: func(ctx context.Context) (string, error) {
+			return "session-1", nil
+		},
+		sendMessageFunc: func(ctx context.Context, sessionID string, prompt ...acpsdk.ContentBlock) (<-chan acp.StreamEvent, error) {
+			ch := make(chan acp.StreamEvent)
+			close(ch)
+			return ch, nil
+		},
+	}
+
+	// 1. Initial run to save session in DB
+	m1 := NewManager(cfg, s, mockB)
+	m1.SetAdapter(&mockAdapter{})
+
+	updateCh1 := m1.HandleMessage(topicID, "Hello", "msg-1", chatID, threadID)
+	for range updateCh1 {
+	}
+	m1.Stop()
+
+	// 2. Restart simulation - New Manager instance with same store
+	s2, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to re-init store: %v", err)
+	}
+	defer s2.Close()
+
+	mockB2 := &mockBridge{
+		supportsLoadSession: true,
+		newSessionFunc: func(ctx context.Context) (string, error) {
+			return "session-unexpected", nil
+		},
+		loadSessionFunc: func(ctx context.Context, sessionID string) error {
+			mu.Lock()
+			loadSessionCalled = true
+			mu.Unlock()
+			return nil
+		},
+		sendMessageFunc: func(ctx context.Context, sessionID string, prompt ...acpsdk.ContentBlock) (<-chan acp.StreamEvent, error) {
+			ch := make(chan acp.StreamEvent)
+			close(ch)
+			return ch, nil
+		},
+	}
+
+	m2 := NewManager(cfg, s2, mockB2)
+	m2.SetAdapter(&mockAdapter{})
+
+	updateCh2 := m2.HandleMessage(topicID, "How are you?", "msg-2", chatID, threadID)
+	for range updateCh2 {
+	}
+	m2.Stop()
+
+	mu.Lock()
+	if !loadSessionCalled {
+		t.Errorf("Expected LoadSession to be called after restart, but it wasn't")
+	}
+	mu.Unlock()
+}
+

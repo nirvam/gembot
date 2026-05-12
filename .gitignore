@@ -1,8 +1,5 @@
 # Binaries
-gembot
-gembot_new
-test_card
-test_acp
+dist/
 
 # OS files
 .DS_Store

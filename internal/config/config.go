@@ -35,7 +35,7 @@ func Load() (*Config, error) {
 	v.SetConfigName(".env")
 	v.SetConfigType("env")
 	v.AddConfigPath(".")
-	
+
 	// Ignore if .env file is missing
 	_ = v.ReadInConfig()
 

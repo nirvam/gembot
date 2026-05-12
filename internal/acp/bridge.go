@@ -1,8 +1,10 @@
 package acp
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
@@ -37,6 +39,8 @@ type StreamEvent struct {
 type Bridge interface {
 	SendMessage(ctx context.Context, sessionID string, prompt ...acpsdk.ContentBlock) (<-chan StreamEvent, error)
 	NewSession(ctx context.Context) (string, error)
+	SupportsLoadSession() bool
+	LoadSession(ctx context.Context, sessionID string) error
 	Close() error
 }
 
@@ -158,30 +162,41 @@ func (c *bridgeClient) WaitForTerminalExit(ctx context.Context, params acpsdk.Wa
 }
 
 type bridgeImpl struct {
-	cmd    *exec.Cmd
-	client *bridgeClient
-	conn   *acpsdk.ClientSideConnection
+	cmd          *exec.Cmd
+	client       *bridgeClient
+	conn         *acpsdk.ClientSideConnection
+	capabilities acpsdk.AgentCapabilities
 }
 
 // NewBridge starts the Agent subprocess and initializes the ACP connection via stdio.
 func NewBridge(agentCmd string, args ...string) (Bridge, error) {
 	cmd := exec.Command(agentCmd, args...)
-	
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stdin pipe: %w", err)
 	}
-	
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stdout pipe: %w", err)
 	}
 
-	cmd.Stderr = os.Stderr
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start agent process: %w", err)
 	}
+
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			log.Printf("[Agent] %s", scanner.Text())
+		}
+	}()
 
 	client := &bridgeClient{
 		streams: make(map[string]chan StreamEvent),
@@ -197,19 +212,33 @@ func NewBridge(agentCmd string, args ...string) (Bridge, error) {
 		},
 		ClientCapabilities: acpsdk.ClientCapabilities{},
 	}
-	_, err = conn.Initialize(ctx, initReq)
+	resp, err := conn.Initialize(ctx, initReq)
 	if err != nil {
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("initialize failed: %w", err)
 	}
 
 	b := &bridgeImpl{
-		cmd:    cmd,
-		client: client,
-		conn:   conn,
+		cmd:          cmd,
+		client:       client,
+		conn:         conn,
+		capabilities: resp.AgentCapabilities,
 	}
 
 	return b, nil
+}
+
+func (b *bridgeImpl) SupportsLoadSession() bool {
+	return b.capabilities.LoadSession
+}
+
+func (b *bridgeImpl) LoadSession(ctx context.Context, sessionID string) error {
+	req := acpsdk.LoadSessionRequest{
+		SessionId:  acpsdk.SessionId(sessionID),
+		McpServers: []acpsdk.McpServer{},
+	}
+	_, err := b.conn.LoadSession(ctx, req)
+	return err
 }
 
 func (b *bridgeImpl) NewSession(ctx context.Context) (string, error) {
@@ -225,7 +254,7 @@ func (b *bridgeImpl) NewSession(ctx context.Context) (string, error) {
 
 func (b *bridgeImpl) SendMessage(ctx context.Context, sessionID string, prompt ...acpsdk.ContentBlock) (<-chan StreamEvent, error) {
 	ch := make(chan StreamEvent, 100)
-	
+
 	b.client.mu.Lock()
 	b.client.streams[sessionID] = ch
 	b.client.mu.Unlock()
@@ -249,7 +278,7 @@ func (b *bridgeImpl) SendMessage(ctx context.Context, sessionID string, prompt .
 		}
 		ch <- StreamEvent{Type: EventTypeDone, Data: ""}
 	}()
-	
+
 	return ch, nil
 }
 

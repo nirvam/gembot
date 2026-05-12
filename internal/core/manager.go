@@ -2,21 +2,18 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
-	"github.com/nirvam/gembot/internal/acp"
 	acpsdk "github.com/coder/acp-go-sdk"
+	"github.com/nirvam/gembot/internal/acp"
 	"github.com/nirvam/gembot/internal/config"
 	"github.com/nirvam/gembot/internal/store"
 )
-
-// HistoryProvider defines the interface for retrieving chat history.
-type HistoryProvider interface {
-	GetHistory(ctx context.Context, chatID, threadID, topicID string) ([]acpsdk.ContentBlock, error)
-}
 
 // Adapter defines the abstract interface for an IM platform integration.
 type Adapter interface {
@@ -31,9 +28,6 @@ type Adapter interface {
 
 	// FormatMarkdown formats text for the specific platform's markdown flavor.
 	FormatMarkdown(text string) string
-
-	// HistoryProvider ensures the adapter can provide context.
-	HistoryProvider
 }
 
 type Manager struct {
@@ -49,11 +43,12 @@ type Manager struct {
 }
 
 type Task struct {
-	TopicID  string
-	Message  string
-	ChatID   string
-	ThreadID string
-	UpdateCh chan<- acp.StreamEvent
+	TopicID   string
+	Message   string
+	MessageID string
+	ChatID    string
+	ThreadID  string
+	UpdateCh  chan<- acp.StreamEvent
 }
 
 func NewManager(cfg *config.Config, s *store.Store, b acp.Bridge) *Manager {
@@ -131,41 +126,53 @@ func (m *Manager) SetAdapter(a Adapter) {
 
 func (m *Manager) processTask(task *Task) {
 	defer close(task.UpdateCh)
+	
+	// Fail-safe: panic recovery
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in processTask: %v\n%s", r, debug.Stack())
+			task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: fmt.Sprintf("\n❌ 处理失败: 内部异常 (%v)", r)}
+		}
+	}()
+
 	// 1. Get or create session
 	record, err := m.store.GetSessionRecord(m.ctx, task.TopicID)
 	if err != nil {
 		log.Printf("Error getting session for topic %s: %v", task.TopicID, err)
-		task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: "Error: Internal server error"}
+		task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: "\n❌ 处理失败: 无法读取会话记录"}
 		return
 	}
 
 	var sessionID string
-	var needsSync bool
 
 	if record == nil {
-		// New session
+		// New session or thread we haven't tracked yet
 		var err error
 		sessionID, err = m.bridge.NewSession(m.ctx)
 		if err != nil {
 			log.Printf("Error creating new session for topic %s: %v", task.TopicID, err)
-			task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: "Error: Agent unavailable"}
+			task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: fmt.Sprintf("\n❌ 处理失败: Agent 会话创建失败 (%v)", err)}
 			return
 		}
-		// If it's a new topic to us, but it might have history in Feishu (Full Mode)
-		needsSync = true
 	} else {
 		sessionID = record.SessionID
-		
-		// Check if we need to sync (first time in this process)
+
+		// Check if we need to restore context (first time in this process for this topic)
 		if _, loaded := m.liveSessions.LoadOrStore(task.TopicID, true); !loaded {
-			needsSync = true
-			// The agent process is fresh, so the session ID from the DB is likely invalid
-			// for this agent instance. We must create a new one.
-			var err error
-			sessionID, err = m.bridge.NewSession(m.ctx)
-			if err != nil {
-				log.Printf("Error creating replacement session for topic %s: %v", task.TopicID, err)
-				// Fallback: we'll continue with the old ID, but it will likely fail in SendMessage
+			if m.bridge.SupportsLoadSession() {
+				// Try to load session via ACP
+				err := m.bridge.LoadSession(m.ctx, sessionID)
+				if err != nil {
+					log.Printf("Failed to load session %s: %v", sessionID, err)
+					task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: "\n❌ 该会话已过期或加载失败，请重新开启新话题。"}
+					m.liveSessions.Delete(task.TopicID) // Remove from live sessions so we don't assume it's valid
+					return
+				}
+			} else {
+				log.Printf("Session load requested but not supported for topic %s", task.TopicID)
+				task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: "\n❌ 该会话已过期，且底层不支持恢复，请重新开启新话题。"}
+				m.liveSessions.Delete(task.TopicID)
+				return
 			}
 		}
 	}
@@ -175,23 +182,13 @@ func (m *Manager) processTask(task *Task) {
 		log.Printf("Error saving session record for topic %s: %v", task.TopicID, err)
 	}
 
-	var prompts []acpsdk.ContentBlock
-	if needsSync && m.adapter != nil {
-		history, err := m.adapter.GetHistory(m.ctx, task.ChatID, task.ThreadID, task.TopicID)
-		if err != nil {
-			log.Printf("Failed to get history for topic %s: %v", task.TopicID, err)
-		} else if len(history) > 0 {
-			log.Printf("Syncing %d historical blocks for topic %s", len(history), task.TopicID)
-			prompts = append(prompts, history...)
-		}
-	}
-	prompts = append(prompts, acpsdk.TextBlock(task.Message))
+	prompts := []acpsdk.ContentBlock{acpsdk.TextBlock(task.Message)}
 
 	// 2. Call ACP Bridge
 	stream, err := m.bridge.SendMessage(m.ctx, sessionID, prompts...)
 	if err != nil {
 		log.Printf("Error sending message to ACP: %v", err)
-		task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: "Error: Agent unavailable"}
+		task.UpdateCh <- acp.StreamEvent{Type: acp.EventTypeText, Data: fmt.Sprintf("\n❌ 处理失败: Agent 通信异常 (%v)", err)}
 		return
 	}
 
@@ -201,16 +198,17 @@ func (m *Manager) processTask(task *Task) {
 	}
 }
 
-func (m *Manager) HandleMessage(topicID, message, chatID, threadID string) <-chan acp.StreamEvent {
+func (m *Manager) HandleMessage(topicID, message, messageID, chatID, threadID string) <-chan acp.StreamEvent {
 	workerIdx := m.hashRouting(topicID)
 	updateCh := make(chan acp.StreamEvent, 100)
-	
+
 	m.workers[workerIdx] <- &Task{
-		TopicID:  topicID,
-		Message:  message,
-		ChatID:   chatID,
-		ThreadID: threadID,
-		UpdateCh: updateCh,
+		TopicID:   topicID,
+		Message:   message,
+		MessageID: messageID,
+		ChatID:    chatID,
+		ThreadID:  threadID,
+		UpdateCh:  updateCh,
 	}
 
 	return updateCh
