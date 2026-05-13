@@ -1,0 +1,33 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          go build -ldflags="-s -w" -o dist/gembot_linux_amd64 ./cmd/gembot/...
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gembot-linux-x86_64
+          path: dist/gembot_linux_amd64
+          if-no-files-found: error
