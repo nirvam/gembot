@@ -4,10 +4,16 @@ on:
   push:
     branches:
       - master
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -31,3 +37,15 @@ jobs:
           name: gembot-linux-x86_64
           path: dist/gembot_linux_amd64
           if-no-files-found: error
+
+      - name: Update Nightly Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Remove the old nightly release and tag if they exist
+          gh release delete nightly --cleanup-tag -y || true
+          # Recreate the nightly release pointing to the new commit
+          gh release create nightly dist/gembot_linux_amd64 \
+            --title "Nightly Build" \
+            --notes "Automated build from the latest commit on master." \
+            --prerelease
