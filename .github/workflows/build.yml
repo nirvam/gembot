@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.26.3'
 
@@ -26,7 +26,7 @@ jobs:
           go build -ldflags="-s -w" -o dist/gembot_linux_amd64 ./cmd/gembot/...
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gembot-linux-x86_64
           path: dist/gembot_linux_amd64
