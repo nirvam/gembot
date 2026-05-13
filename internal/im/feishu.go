@@ -295,6 +295,8 @@ func NewFeishuAdapter(appID, appSecret, verificationToken, encryptKey string, ma
 			topicID := ""
 			if msg.RootId != nil && *msg.RootId != "" {
 				topicID = *msg.RootId
+			} else if msg.ParentId != nil && *msg.ParentId != "" {
+				topicID = *msg.ParentId
 			} else {
 				topicID = msgID
 			}

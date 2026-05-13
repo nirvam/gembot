@@ -65,11 +65,11 @@ func TestManager_HandleMessage(t *testing.T) {
 		},
 	}
 
-	cfg := &config.Config{WorkerCount: 1}
+	cfg := &config.Config{WorkerCount: 1, SessionRetentionDays: 7}
 	m := NewManager(cfg, s, mock)
 	defer m.Stop()
 
-	updateCh := m.HandleMessage("topic-1", "Hi", "msg-1", "chat-1", "thread-1")
+	updateCh := m.HandleMessage("topic-1", Message{Blocks: []MessageBlock{{Type: BlockTypeText, Text: "Hi"}}}, "msg-1", "chat-1", "thread-1")
 
 	var responses []acp.StreamEvent
 	for resp := range updateCh {
@@ -141,7 +141,7 @@ func TestManager_LoadSession(t *testing.T) {
 	}
 	defer s.Close()
 
-	cfg := &config.Config{WorkerCount: 1}
+	cfg := &config.Config{WorkerCount: 1, SessionRetentionDays: 7}
 	topicID := "topic-load"
 	chatID := "chat-1"
 	threadID := "thread-1"
@@ -164,7 +164,7 @@ func TestManager_LoadSession(t *testing.T) {
 	m1 := NewManager(cfg, s, mockB)
 	m1.SetAdapter(&mockAdapter{})
 
-	updateCh1 := m1.HandleMessage(topicID, "Hello", "msg-1", chatID, threadID)
+	updateCh1 := m1.HandleMessage(topicID, Message{Blocks: []MessageBlock{{Type: BlockTypeText, Text: "Hello"}}}, "msg-1", chatID, threadID)
 	for range updateCh1 {
 	}
 	m1.Stop()
@@ -197,7 +197,7 @@ func TestManager_LoadSession(t *testing.T) {
 	m2 := NewManager(cfg, s2, mockB2)
 	m2.SetAdapter(&mockAdapter{})
 
-	updateCh2 := m2.HandleMessage(topicID, "How are you?", "msg-2", chatID, threadID)
+	updateCh2 := m2.HandleMessage(topicID, Message{Blocks: []MessageBlock{{Type: BlockTypeText, Text: "How are you?"}}}, "msg-2", chatID, threadID)
 	for range updateCh2 {
 	}
 	m2.Stop()
