@@ -44,7 +44,7 @@ type Manager struct {
 
 type Task struct {
 	TopicID   string
-	Message   string
+	Message   Message
 	MessageID string
 	ChatID    string
 	ThreadID  string
@@ -182,7 +182,28 @@ func (m *Manager) processTask(task *Task) {
 		log.Printf("Error saving session record for topic %s: %v", task.TopicID, err)
 	}
 
-	prompts := []acpsdk.ContentBlock{acpsdk.TextBlock(task.Message)}
+	var prompts []acpsdk.ContentBlock
+	for _, block := range task.Message.Blocks {
+		switch block.Type {
+		case BlockTypeText:
+			prompts = append(prompts, acpsdk.TextBlock(block.Text))
+		case BlockTypeImage:
+			prompts = append(prompts, acpsdk.ImageBlock(block.Data, block.MimeType))
+		case BlockTypeAudio:
+			prompts = append(prompts, acpsdk.AudioBlock(block.Data, block.MimeType))
+		case BlockTypeResourceLink:
+			prompts = append(prompts, acpsdk.ResourceLinkBlock(block.Name, block.URI))
+		case BlockTypeResource:
+			mimeType := block.MimeType
+			prompts = append(prompts, acpsdk.ResourceBlock(acpsdk.EmbeddedResourceResource{
+				BlobResourceContents: &acpsdk.BlobResourceContents{
+					Uri:      block.URI,
+					MimeType: &mimeType,
+					Blob:     block.Data,
+				},
+			}))
+		}
+	}
 
 	// 2. Call ACP Bridge
 	stream, err := m.bridge.SendMessage(m.ctx, sessionID, prompts...)
@@ -198,7 +219,7 @@ func (m *Manager) processTask(task *Task) {
 	}
 }
 
-func (m *Manager) HandleMessage(topicID, message, messageID, chatID, threadID string) <-chan acp.StreamEvent {
+func (m *Manager) HandleMessage(topicID string, message Message, messageID, chatID, threadID string) <-chan acp.StreamEvent {
 	workerIdx := m.hashRouting(topicID)
 	updateCh := make(chan acp.StreamEvent, 100)
 

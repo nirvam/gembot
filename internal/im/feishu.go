@@ -130,6 +130,136 @@ func buildCardContent(text string, logs []*acp.LogEntry) string {
 	return string(b)
 }
 
+func applyStyle(text string, styles []interface{}) string {
+	if len(styles) == 0 {
+		return text
+	}
+
+	isBold := false
+	isItalic := false
+	isLineThrough := false
+
+	for _, s := range styles {
+		if str, ok := s.(string); ok {
+			switch str {
+			case "bold":
+				isBold = true
+			case "italic":
+				isItalic = true
+			case "lineThrough":
+				isLineThrough = true
+			}
+		}
+	}
+
+	res := text
+	if isBold {
+		res = "**" + res + "**"
+	}
+	if isItalic {
+		res = "*" + res + "*"
+	}
+	if isLineThrough {
+		res = "~~" + res + "~~"
+	}
+	return res
+}
+
+func parseFeishuPost(content string) string {
+	var raw struct {
+		Title   string          `json:"title"`
+		Content [][]interface{} `json:"content"`
+	}
+
+	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		return content
+	}
+
+	var result string
+
+	if raw.Title != "" {
+		result += "# " + raw.Title + "\n\n"
+	}
+
+	for i, line := range raw.Content {
+		for _, elemIface := range line {
+			elem, ok := elemIface.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			tag, _ := elem["tag"].(string)
+			switch tag {
+			case "text":
+				text, _ := elem["text"].(string)
+				style, _ := elem["style"].([]interface{})
+				result += applyStyle(text, style)
+			case "a":
+				text, _ := elem["text"].(string)
+				href, _ := elem["href"].(string)
+				style, _ := elem["style"].([]interface{})
+				styledText := applyStyle(text, style)
+				result += fmt.Sprintf("[%s](%s)", styledText, href)
+			case "at":
+				userID, _ := elem["user_id"].(string)
+				userName, _ := elem["user_name"].(string)
+				if userName == "" {
+					userName = userID
+				}
+				style, _ := elem["style"].([]interface{})
+				result += applyStyle(fmt.Sprintf("@%s", userName), style)
+			case "emotion":
+				emojiType, _ := elem["emoji_type"].(string)
+				result += fmt.Sprintf("[%s]", emojiType)
+			case "hr":
+				result += "\n---\n"
+			case "code_block":
+				lang, _ := elem["language"].(string)
+				text, _ := elem["text"].(string)
+				result += fmt.Sprintf("\n```%s\n%s\n```\n", lang, text)
+			case "img":
+				result += "[图片]"
+			case "media":
+				result += "[视频]"
+			}
+		}
+		if i < len(raw.Content)-1 {
+			result += "\n"
+		}
+	}
+
+	return result
+}
+
+func parseMessage(msgType string, content string) core.Message {
+	var text string
+
+	switch msgType {
+	case "text":
+		var raw struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(content), &raw); err == nil {
+			text = raw.Text
+		} else {
+			text = content
+		}
+	case "post":
+		text = parseFeishuPost(content)
+	default:
+		text = fmt.Sprintf("[Unsupported message type: %s]", msgType)
+	}
+
+	return core.Message{
+		Blocks: []core.MessageBlock{
+			{
+				Type: core.BlockTypeText,
+				Text: text,
+			},
+		},
+	}
+}
+
 func NewFeishuAdapter(appID, appSecret, verificationToken, encryptKey string, manager *core.Manager, s *store.Store) core.Adapter {
 	client := lark.NewClient(appID, appSecret)
 
@@ -170,19 +300,16 @@ func NewFeishuAdapter(appID, appSecret, verificationToken, encryptKey string, ma
 			}
 
 			// Parse content
-			var contentObj struct {
-				Text string `json:"text"`
-			}
-			var textContent string
-			if msg.Content != nil {
-				if err := json.Unmarshal([]byte(*msg.Content), &contentObj); err == nil {
-					textContent = contentObj.Text
-				} else {
-					textContent = *msg.Content
-				}
+			var parsedMsg core.Message
+			if msg.Content != nil && msg.MessageType != nil {
+				parsedMsg = parseMessage(*msg.MessageType, *msg.Content)
 			}
 
-			log.Printf("Received message for topic %s: %s", topicID, textContent)
+			logText := ""
+			if len(parsedMsg.Blocks) > 0 {
+				logText = parsedMsg.Blocks[0].Text
+			}
+			log.Printf("Received message for topic %s: %s", topicID, logText)
 
 			// Send immediate acknowledgment
 			replyMsgID, err := a.Reply(ctx, msgID, "⏳ 正在思考...")
@@ -200,7 +327,7 @@ func NewFeishuAdapter(appID, appSecret, verificationToken, encryptKey string, ma
 			}
 
 			// Start streaming updates
-			go a.streamUpdates(a.manager.Context(), topicID, textContent, msgID, chatID, threadID, replyMsgID)
+			go a.streamUpdates(a.manager.Context(), topicID, parsedMsg, msgID, chatID, threadID, replyMsgID)
 
 			return nil
 		}).
@@ -213,7 +340,7 @@ func NewFeishuAdapter(appID, appSecret, verificationToken, encryptKey string, ma
 	return a
 }
 
-func (a *FeishuAdapter) streamUpdates(ctx context.Context, topicID, message, messageID, chatID, threadID, replyMsgID string) {
+func (a *FeishuAdapter) streamUpdates(ctx context.Context, topicID string, message core.Message, messageID, chatID, threadID, replyMsgID string) {
 	updateCh := a.manager.HandleMessage(topicID, message, messageID, chatID, threadID)
 
 	ticker := time.NewTicker(1 * time.Second)
